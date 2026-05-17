@@ -9,28 +9,30 @@ import requests
 from config import USERNAME, TOKEN, REPO_OWNER, REPO_NAME
 
 def make_github_issue(title, body=None, assignee=USERNAME, closed=False, labels=[]):
-    # Create an issue on github.com using the given parameters
-    # Url to create issues via POST
-    url = 'https://api.github.com/repos/%s/%s/import/issues' % (REPO_OWNER, REPO_NAME)
+    # Create a regular issue on GitHub. The import API requires different
+    # permissions and is not a good fit for this project.
+    url = 'https://api.github.com/repos/%s/%s/issues' % (REPO_OWNER, REPO_NAME)
 
     # Headers
     headers = {
         "Authorization": "token %s" % TOKEN,
-        "Accept": "application/vnd.github.golden-comet-preview+json"
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
-    # Create our issue
-    data = {'issue': {'title': title,
-                      'body': body,
-                      'assignee': assignee,
-                      'closed': closed,
-                      'labels': labels}}
-
-    payload = json.dumps(data)
+    # Build a normal create-issue payload.
+    data = {
+        'title': title,
+        'body': body or '',
+    }
+    if assignee:
+        data['assignees'] = [assignee]
+    if labels:
+        data['labels'] = labels
 
     # Add the issue to our repository
-    response = requests.request("POST", url, data=payload, headers=headers)
-    if response.status_code == 202:
+    response = requests.post(url, data=json.dumps(data), headers=headers)
+    if response.status_code == 201:
         print ('Successfully created Issue "%s"' % title)
     else:
         print ('Could not create Issue "%s"' % title)

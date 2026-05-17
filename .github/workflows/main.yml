@@ -4,14 +4,31 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
   schedule:
     -   cron: "10 20 * * 1,2,3,4,5,6"
+
+permissions:
+  contents: write
+  issues: write
 
 jobs:
   backup:
     runs-on: ubuntu-latest
     name: Backup
     timeout-minutes: 25
+    env:
+      GITHUB_USERNAME: ${{ github.repository_owner }}
+      GITHUB_TOKEN: ${{ github.token }}
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      KEYWORD_LIST: ${{ secrets.KEYWORD_LIST }}
+      LANGUAGE: zh
+      FILTER_TIME_SPAN_DAYS: 7
+      LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_API_BASE: ${{ secrets.LLM_API_BASE }}
+      LLM_API_KEYS: ${{ secrets.LLM_API_KEYS }}
     steps:
       -   uses: actions/checkout@v2
       -   name: Set up Python 3.9
@@ -23,7 +40,7 @@ jobs:
           run: |
             if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       -   name: Run backup
-          run: python main.py
+          run: python main.py --filter_times_span 7
 
       -   name: Commit changes
           uses: elstudio/actions-js-build/commit@v3

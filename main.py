@@ -12,16 +12,29 @@ from get_paper_from_pdf import Paper
 from github_issue import make_github_issue
 
 
-# os.environ["http_proxy"] = "http://127.0.0.1:8118"
-# os.environ["https_proxy"] = "http://127.0.0.1:8118"
+# arXiv's legacy HTTP endpoint now redirects; pin the client to HTTPS so
+# older versions of the `arxiv` package keep working without a 301 failure.
+arxiv.Client.query_url_format = "https://export.arxiv.org/api/query?{}"
 
-from config import OPENAI_API_KEYS, KEYWORD_LIST, LANGUAGE
+
+os.environ["http_proxy"] = "http://127.0.0.1:7898"
+os.environ["https_proxy"] = "http://127.0.0.1:7898"
+
+from config import (
+    OPENAI_API_KEYS,
+    KEYWORD_LIST,
+    LANGUAGE,
+    LLM_PROVIDER,
+    LLM_MODEL,
+    LLM_API_BASE,
+    FILTER_TIME_SPAN_DAYS,
+)
 
 from datetime import datetime, timedelta
 import pytz
 
 now = datetime.now(pytz.utc)
-yesterday = now - timedelta(days=1.1)
+yesterday = now - timedelta(days=30)
 
 
 # 定义Reader类
@@ -53,6 +66,47 @@ class Reader:
         self.file_format = args.file_format        
         self.max_token_num = 4096
         self.encoding = tiktoken.get_encoding("gpt2")
+        self.llm_provider = LLM_PROVIDER
+        self.llm_model = LLM_MODEL
+        self.llm_api_base = LLM_API_BASE
+
+    def _normalize_keyword_token(self, token):
+        token = re.sub(r"[^a-z0-9]+", "", token.lower())
+        if len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        return token
+
+    def _normalize_search_text(self, text):
+        normalized_tokens = []
+        for token in re.findall(r"[a-z0-9]+", text.lower()):
+            normalized = self._normalize_keyword_token(token)
+            if normalized:
+                normalized_tokens.append(normalized)
+        return " ".join(normalized_tokens)
+
+    def _use_next_api_key(self):
+        if not self.chat_api_list:
+            raise ValueError("No LLM API keys configured. Set LLM_API_KEYS in your environment.")
+        api_key = self.chat_api_list[self.cur_api]
+        self.cur_api += 1
+        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list) else self.cur_api
+        return api_key
+
+    def _configure_llm_client(self):
+        openai.api_key = self._use_next_api_key()
+        if self.llm_api_base:
+            openai.api_base = self.llm_api_base
+        elif self.llm_provider == "deepseek":
+            openai.api_base = "https://api.deepseek.com/v1"
+        else:
+            openai.api_base = "https://api.openai.com/v1"
+
+    def _create_chat_completion(self, messages):
+        self._configure_llm_client()
+        return openai.ChatCompletion.create(
+            model=self.llm_model,
+            messages=messages,
+        )
                 
     def get_arxiv(self, max_results=30):
         # https://info.arxiv.org/help/api/user-manual.html#query_details
@@ -69,23 +123,29 @@ class Reader:
         for index, result in enumerate(search.results()):
             print(index, result.title, result.updated)
             
-        filter_results = []   
+        filter_results = []
         filter_keys = self.filter_keys
-        
+        keyword_terms = []
+        for term in filter_keys.split(" "):
+            normalized_term = self._normalize_keyword_token(term)
+            if normalized_term:
+                keyword_terms.append(normalized_term)
+
         print("filter_keys:", self.filter_keys)
-        # 确保每个关键词都能在摘要中找到，才算是目标论文
+        print("normalized_terms:", keyword_terms)
+        # Match against title + abstract together so papers are not dropped
+        # when a keyword appears outside the summary text.
         for index, result in enumerate(search.results()):
-            # 过滤不在时间范围内的论文
             if result.updated < self.filter_times_span[0] or result.updated > self.filter_times_span[1]:
-                continue 
+                print("skip_by_time:", result.title, result.updated)
+                continue
             abs_text = result.summary.replace('-\n', '-').replace('\n', ' ')
-            meet_num = 0
-            for f_key in filter_keys.split(" "):
-                if f_key.lower() in abs_text.lower():
-                    meet_num += 1
-            if meet_num == len(filter_keys.split(" ")):
+            search_text = self._normalize_search_text(result.title + " " + abs_text)
+            missing_terms = [term for term in keyword_terms if term not in search_text]
+            if not missing_terms:
                 filter_results.append(result)
-                # break
+            else:
+                print("skip_by_keyword:", result.title, "missing_terms:", missing_terms)
         print("筛选后剩下的论文数量：")
         print("filter_results:", len(filter_results))
         print("filter_papers:")
@@ -274,9 +334,6 @@ class Reader:
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_conclusion(self, text, conclusion_prompt_token = 800):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-conclusion_prompt_token)/text_token)
         clip_text = text[:clip_text_index]   
@@ -297,11 +354,7 @@ class Reader:
                  Be sure to use {} answers (proper nouns need to be marked in English), statements as concise and academic as possible, do not repeat the content of the previous <summary>, the value of the use of the original numbers, be sure to strictly follow the format, the corresponding content output to xxx, in accordance with \n line feed, ....... means fill in according to the actual requirements, if not, you can not write.                 
                  """.format(self.language, self.language)},
             ]
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            # prompt需要用英语替换，少占用token。
-            messages=messages,
-        )
+        response = self._create_chat_completion(messages)
         result = ''
         for choice in response.choices:
             result += choice.message.content
@@ -316,9 +369,6 @@ class Reader:
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_method(self, text, method_prompt_token = 800):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-method_prompt_token)/text_token)
         clip_text = text[:clip_text_index]        
@@ -341,10 +391,7 @@ class Reader:
                  Be sure to use {} answers (proper nouns need to be marked in English), statements as concise and academic as possible, do not repeat the content of the previous <summary>, the value of the use of the original numbers, be sure to strictly follow the format, the corresponding content output to xxx, in accordance with \n line feed, ....... means fill in according to the actual requirements, if not, you can not write.                 
                  """.format(self.language, self.language)},
             ]
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-        )
+        response = self._create_chat_completion(messages)
         result = ''
         for choice in response.choices:
             result += choice.message.content
@@ -359,9 +406,6 @@ class Reader:
                     stop=tenacity.stop_after_attempt(5),
                     reraise=True)
     def chat_summary(self, text, summary_prompt_token = 1100):
-        openai.api_key = self.chat_api_list[self.cur_api]
-        self.cur_api += 1
-        self.cur_api = 0 if self.cur_api >= len(self.chat_api_list)-1 else self.cur_api
         text_token = len(self.encoding.encode(text))
         clip_text_index = int(len(text)*(self.max_token_num-summary_prompt_token)/text_token)
         clip_text = text[:clip_text_index]
@@ -387,10 +431,7 @@ class Reader:
                  """.format(self.language, self.language, self.language)},
             ]
                 
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-        )
+        response = self._create_chat_completion(messages)
         result = ''
         for choice in response.choices:
             result += choice.message.content
@@ -405,7 +446,10 @@ class Reader:
     def show_info(self):        
         print(f"Key word: {self.key_word}")
         print(f"Query: {self.query}")
-        print(f"Sort: {self.sort}")     
+        print(f"Sort: {self.sort}")
+        print(f"LLM provider: {self.llm_provider}")
+        print(f"LLM model: {self.llm_model}")
+        print(f"Filter time span: {self.filter_times_span[0]} -> {self.filter_times_span[1]}")
 
 def save_to_file(htmls, root_path='./', date_str=None, file_format='md'):
     # # 整合成一个文件，打包保存下来。
@@ -460,7 +504,10 @@ def main(args):
         [print(paper_index, paper_name.path.split('\\')[-1]) for paper_index, paper_name in enumerate(paper_list)]
         reader1.summary_with_chat(paper_list=paper_list)
     else:
-        filter_times_span = (now-timedelta(days=args.filter_times_span), now)
+        if args.filter_times_span and args.filter_times_span > 0:
+            filter_times_span = (now-timedelta(days=args.filter_times_span), now)
+        else:
+            filter_times_span = (datetime.min.replace(tzinfo=pytz.utc), now)
         title = str(now)[:13].replace(' ', '-')
         htmls_body = []
         for filter_key in args.filter_keys:
@@ -497,7 +544,7 @@ if __name__ == '__main__':
     parser.add_argument("--query", type=str, default='all:remote AND all:sensing', help="the query string, ti: xx, au: xx, all: xx,") 
     parser.add_argument("--key_word", type=str, default='remote sensing', help="the key word of user research fields")
     parser.add_argument("--filter_keys", type=list, default=KEYWORD_LIST, help="the filter key words, 摘要中每个单词都得有，才会被筛选为目标论文")
-    parser.add_argument("--filter_times_span", type=int, default=1.1, help='how many days of files to be filtered.')
+    parser.add_argument("--filter_times_span", type=float, default=FILTER_TIME_SPAN_DAYS, help='how many days of files to be filtered. Use 0 to disable time filtering.')
     parser.add_argument("--max_results", type=int, default=20, help="the maximum number of results")
     # arxiv.SortCriterion.Relevance
     parser.add_argument("--sort", type=str, default="LastUpdatedDate", help="another is LastUpdatedDate | Relevance")
