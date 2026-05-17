@@ -17,8 +17,8 @@ from github_issue import make_github_issue
 arxiv.Client.query_url_format = "https://export.arxiv.org/api/query?{}"
 
 
-os.environ["http_proxy"] = "http://127.0.0.1:7898"
-os.environ["https_proxy"] = "http://127.0.0.1:7898"
+# os.environ["http_proxy"] = "http://127.0.0.1:7898"
+# os.environ["https_proxy"] = "http://127.0.0.1:7898"
 
 from config import (
     OPENAI_API_KEYS,
