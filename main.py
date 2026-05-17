@@ -107,6 +107,13 @@ class Reader:
             model=self.llm_model,
             messages=messages,
         )
+
+    def _print_response_time(self, response):
+        response_ms = getattr(response, "response_ms", None)
+        if response_ms is None:
+            print("response_time: unavailable")
+        else:
+            print("response_time:", response_ms / 1000.0, "s")
                 
     def get_arxiv(self, max_results=30):
         # https://info.arxiv.org/help/api/user-manual.html#query_details
@@ -362,7 +369,7 @@ class Reader:
         print("prompt_token_used:", response.usage.prompt_tokens,
               "completion_token_used:", response.usage.completion_tokens,
               "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's')             
+        self._print_response_time(response)
         return result            
     
     @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
@@ -399,7 +406,7 @@ class Reader:
         print("prompt_token_used:", response.usage.prompt_tokens,
               "completion_token_used:", response.usage.completion_tokens,
               "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's') 
+        self._print_response_time(response)
         return result
     
     @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
@@ -439,7 +446,7 @@ class Reader:
         print("prompt_token_used:", response.usage.prompt_tokens,
               "completion_token_used:", response.usage.completion_tokens,
               "total_token_used:", response.usage.total_tokens)
-        print("response_time:", response.response_ms/1000.0, 's')                    
+        self._print_response_time(response)
         return result      
 
     # 定义一个方法，打印出读者信息
